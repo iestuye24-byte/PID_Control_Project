@@ -1,0 +1,884 @@
+classdef app7_1 < matlab.apps.AppBase
+
+    % Properties that correspond to app components
+    properties (Access = public)
+        UIFigure                     matlab.ui.Figure
+        GainsChangingSwitch          matlab.ui.control.Switch
+        GainsChangingSwitchLabel     matlab.ui.control.Label
+        SAVECSVButton                matlab.ui.control.Button
+        STARTButton                  matlab.ui.control.Button
+        PAUSEButton                  matlab.ui.control.Button
+        RESTARTButton                matlab.ui.control.Button
+        STOPButton                   matlab.ui.control.Button
+        NrSamplesSpinner             matlab.ui.control.Spinner
+        NrSamplesSpinnerLabel        matlab.ui.control.Label
+        SetPointEditField            matlab.ui.control.NumericEditField
+        SetpointvalueEditFieldLabel  matlab.ui.control.Label
+        SetPointSlider               matlab.ui.control.Slider
+        KdValueSlider                matlab.ui.control.Slider
+        KdValueSliderLabel           matlab.ui.control.Label
+        KiValueSlider                matlab.ui.control.Slider
+        KiValueSliderLabel           matlab.ui.control.Label
+        KpValueSlider                matlab.ui.control.Slider
+        KpValueSliderLabel           matlab.ui.control.Label
+        R_LDREditField               matlab.ui.control.NumericEditField
+        PWMoutputEditField           matlab.ui.control.NumericEditField
+        ErrorDifEditField            matlab.ui.control.NumericEditField
+        ErrorIntEditField            matlab.ui.control.NumericEditField
+        ErrorEditField               matlab.ui.control.NumericEditField
+        ActualValueEditField         matlab.ui.control.NumericEditField
+        R_LDRGauge                   matlab.ui.control.Gauge
+        R_LDRLabel                   matlab.ui.control.Label
+        PWMoutputGauge               matlab.ui.control.Gauge
+        PWMoutputVGaugeLabel         matlab.ui.control.Label
+        ErrorDifGauge                matlab.ui.control.Gauge
+        ErrorDifVGaugeLabel          matlab.ui.control.Label
+        ErrorIntGauge                matlab.ui.control.Gauge
+        ErrorIntVGaugeLabel          matlab.ui.control.Label
+        ErrorGauge                   matlab.ui.control.Gauge
+        ErrorVGaugeLabel             matlab.ui.control.Label
+        ActualValueGauge             matlab.ui.control.Gauge
+        ActualValueVGaugeLabel       matlab.ui.control.Label
+    end
+
+    
+    properties (Access = private)
+        
+        a = arduino('COM5', 'Uno');
+        StopFlag  = 0
+        PauseFlag = 1
+        PlotFigure = []
+
+        % Data recording vectors
+        ActualValueVec   = []
+        SetPointVec      = []
+        ErrorVec         = []
+        ErrorIntVec      = []
+        ErrorDifVec      = []
+        OutputVoltageVec = []
+        CurrentN         = 1
+
+        %%% [APP10 FEATURE ADDED: TRUE TIME LOGGING] %%%
+        % TimeVec replaces the fake mathematical time generation 
+        % so your CSV files have perfect timestamps.
+        TimeVec          = []
+        ElapsedTime      = 0
+                
+        % Per-sample gain vectors — always recorded regardless of switch
+        KpVec = []
+        KiVec = []
+        KdVec = []
+
+        %%% [APP10 FEATURE ADDED: DECOUPLED GAINS] %%%
+        % These variables hold the actual values used by the PID math,
+        % allowing the Switch feature to work properly.
+        Kp_applied = 0
+        Ki_applied = 0
+        Kd_applied = 0
+        
+        % Gain change event log
+        % Populated only when switch is ON (ValueChangingFcn active)
+        % Each row: {Sample, Time_s, Gain, OldValue, NewValue, Description}
+        GainChangeLog = {}
+        LastKp = 0
+        LastKi = 0
+        LastKd = 0
+
+    end
+    
+
+    % Callbacks that handle component events
+    methods (Access = private)
+
+        % Code that executes after component creation
+        function startupFcn(app)
+            app.StopFlag = 0;
+            app.PauseFlag = 1;   % wait for START on first launch
+            runController(app);
+        end
+
+        function runController(app)
+
+            % STEP 1 — HOUSEKEEPING
+            app.StopFlag = 0;
+            close all;
+            clc;
+
+            % STEP 2 — CONSTANTS AND LIMITS
+            IntErrorMax       =  50;
+            IntErrorMin       = -50;
+            R_Series          = 5100;
+            Vcc               = 5;
+            DataVectorSizeMax = 10000;
+
+            % STEP 3 — READ NrSamples FROM SPINNER
+            NrSamples      = app.NrSamplesSpinner.Value;
+            AverageVoltage = zeros(NrSamples, 1);
+
+            % STEP 4 — AUTO-CALIBRATION
+            % SetPointMin — LED fully ON (max light → min A0 voltage)
+            writePWMVoltage(app.a, 'D3', 5);
+            for i = 1:NrSamples
+                AverageVoltage(i) = readVoltage(app.a, 'A0');
+            end
+            SetPointMin = mean(AverageVoltage);
+
+            % SetPointMax — LED fully OFF (no light → max A0 voltage)
+            writePWMVoltage(app.a, 'D3', 0);
+            for i = 1:NrSamples
+                AverageVoltage(i) = readVoltage(app.a, 'A0');
+            end
+            SetPointMax = mean(AverageVoltage);
+
+            % STEP 5 — APPLY CALIBRATED LIMITS
+            app.ActualValueGauge.Limits  = [round(SetPointMin,1), round(SetPointMax,1)];
+            app.SetPointSlider.Limits    = [round(SetPointMin,1), round(SetPointMax,1)];
+            app.SetPointEditField.Limits = [round(SetPointMin,1), round(SetPointMax,1)];
+
+            % STEP 6 — SET INITIAL SETPOINT TO MIDPOINT
+            midPoint = (round(SetPointMin,1) + round(SetPointMax,1)) / 2;
+            app.SetPointEditField.Value = midPoint;
+            app.SetPointSlider.Value    = midPoint;
+
+            % STEP 7 — RESET ALL GUI DISPLAYS TO ZERO
+            % (important on restart so old readings are cleared)
+            app.ActualValueEditField.Value = 0;
+            app.ErrorEditField.Value       = 0;
+            app.ErrorIntEditField.Value    = 0;
+            app.ErrorDifEditField.Value    = 0;
+            app.PWMoutputEditField.Value   = 0;
+            app.R_LDREditField.Value       = 0;
+            app.ActualValueGauge.Value     = app.ActualValueGauge.Limits(1);
+            app.ErrorGauge.Value           = 0;
+            app.ErrorIntGauge.Value        = 0;
+            app.ErrorDifGauge.Value        = 0;
+            app.PWMoutputGauge.Value       = 0;
+            app.R_LDRGauge.Value           = 0;
+
+            % STEP 8 — PRE-ALLOCATE DATA RECORDING VECTORS
+            app.ActualValueVec   = zeros(DataVectorSizeMax, 1);
+            app.SetPointVec      = zeros(DataVectorSizeMax, 1);
+            app.ErrorVec         = zeros(DataVectorSizeMax, 1);
+            app.ErrorIntVec      = zeros(DataVectorSizeMax, 1);
+            app.ErrorDifVec      = zeros(DataVectorSizeMax, 1);
+            app.OutputVoltageVec = zeros(DataVectorSizeMax, 1);
+            app.KpVec            = zeros(DataVectorSizeMax, 1);
+            app.KiVec            = zeros(DataVectorSizeMax, 1);
+            app.KdVec            = zeros(DataVectorSizeMax, 1);
+            app.CurrentN         = 1;
+
+            %%% [APP10 FEATURE ADDED: TRUE TIME LOGGING] %%%
+            app.TimeVec          = zeros(DataVectorSizeMax, 1);
+            app.ElapsedTime      = 0;
+            
+            %%% [APP10 FEATURE ADDED: DECOUPLED GAINS] %%%
+            app.Kp_applied       = app.KpValueSlider.Value;
+            app.Ki_applied       = app.KiValueSlider.Value;
+            app.Kd_applied       = app.KdValueSlider.Value;
+            
+            % Reset gain change log and seed last-known values
+            app.GainChangeLog = {};
+            app.LastKp = app.KpValueSlider.Value;
+            app.LastKi = app.KiValueSlider.Value;
+            app.LastKd = app.KdValueSlider.Value;
+
+            % Reset switch to OFF at the start of every run
+            app.GainsChangingSwitch.Value = 'Off';
+
+            % STEP 9 — INITIALISE PID STATE VARIABLES
+            Errorint = 0;
+            ErrorOld = 0;
+            n        = 1;
+
+            %%% [APP10 FEATURE ADDED: TRUE TIME LOGGING] %%%
+            loopTimer = tic;
+            
+            % STEP 10 — CREATE LIVE PLOT FIGURE
+            % The figure is created once here before the loop starts.
+            % It appears immediately alongside the GUI window.
+            % Line handles (hAV, hSP, etc.) are stored so we can update
+            % their data each iteration without redrawing from scratch.
+            % 'drawnow limitrate' inside the loop refreshes the display.
+
+            app.PlotFigure = figure( ...
+                'Name',     'PID Live Plots', ...
+                'Units',    'normalized', ...
+                'Position', [0.55 0.05 0.43 0.88]);  % right side of screen
+
+            % --- Subplot 1: Actual Value vs Setpoint ---------------------
+            ax1 = subplot(5,1,1);
+            hAV = plot(nan, 'b-',  'LineWidth', 1.2); hold on
+            hSP = plot(nan, 'r--', 'LineWidth', 1.2);
+            ylabel('V'); title('Actual Value vs Setpoint, V'); grid on
+            legend('Actual Value','SetPoint','Location','best')
+            ylim([round(SetPointMin,1), round(SetPointMax,1)])
+
+            % --- Subplot 2: Error ----------------------------------------
+            ax2 = subplot(5,1,2);
+            hER = plot(nan, 'Color', [0.2 0.6 0.2], 'LineWidth', 1);
+            ylabel('V'); title('Error, V'); grid on
+
+            % --- Subplot 3: Integrated Error -----------------------------
+            ax3 = subplot(5,1,3);
+            hEI = plot(nan, 'Color', [0.8 0.4 0], 'LineWidth', 1);
+            ylabel('Accum V'); title('Integrated Error, V'); grid on
+
+            % --- Subplot 4: Derivative Error -----------------------------
+            ax4 = subplot(5,1,4);
+            hED = plot(nan, 'Color', [0.5 0 0.5], 'LineWidth', 1);
+            ylabel('V/sample'); title('Differentiated Error, V'); grid on
+
+            % --- Subplot 5: PWM Output Voltage ---------------------------
+            ax5 = subplot(5,1,5);
+            hOV = plot(nan, 'r-', 'LineWidth', 1);
+            ylabel('V'); title('PWM Output Voltage, V'); grid on
+            ylim([0 5])
+
+            % STEP 11 — PID CONTROL LOOP
+            while app.StopFlag == 0
+
+                % --- PAUSE / WAITING-FOR-START check ----------------------
+                % PauseFlag = 1 on startup → loop idles here until START
+                % is pressed. Also idles here when PAUSE is pressed during
+                % a run. The LED is turned off while paused for safety.
+                % Kp, Ki, Kd and Setpoint sliders remain fully adjustable.
+                % The plot window stays open and visible during the pause.
+                if app.PauseFlag == 1
+                    writePWMVoltage(app.a, 'D3', 0);  % LED off while paused
+                    pause(0.05);
+                    drawnow;
+
+                    %%% [APP10 FEATURE ADDED: TRUE TIME LOGGING] %%%
+                    loopTimer = tic; % Reset timer so we don't get a huge time jump
+
+                    continue;   % skip back to while condition, no recording
+                end
+                % ----------------------------------------------------------
+
+                %%% [APP10 FEATURE ADDED: TRUE TIME LOGGING] %%%
+                % Measure real elapsed time strictly for the CSV files and Gain Log
+                dt = toc(loopTimer);
+                if dt <= 0; dt = 0.001; end 
+                loopTimer = tic;
+                app.ElapsedTime = app.ElapsedTime + dt;
+                app.TimeVec(n)  = app.ElapsedTime; 
+                
+                % (a) Setpoint
+                SetPoint = app.SetPointSlider.Value;
+                app.SetPointEditField.Value = SetPoint;
+                app.SetPointVec(n)      = SetPoint;
+
+                % (b) Read and average sensor voltage
+                for i = 1:NrSamples
+                    AverageVoltage(i) = readVoltage(app.a, 'A0');
+                end
+                ActualValue = mean(AverageVoltage);
+                app.ActualValueGauge.Value     = ActualValue;
+                app.ActualValueEditField.Value  = ActualValue;
+                app.ActualValueVec(n)   = ActualValue;
+
+                % (c.0) LDR resistance
+                R_LDR = R_Series * (ActualValue / (Vcc - ActualValue));
+                app.R_LDRGauge.Value     = R_LDR;
+                app.R_LDREditField.Value  = R_LDR;
+
+                % (c.1) Proportional error
+                Error = SetPoint - ActualValue;
+                app.ErrorGauge.Value     = Error;
+                app.ErrorEditField.Value  = Error;
+                app.ErrorVec(n)         = Error;
+
+                % (c.2) Integral error with anti-windup
+                Errorint = Errorint + Error;
+                if Errorint > IntErrorMax,  Errorint = IntErrorMax;  end
+                if Errorint < IntErrorMin,  Errorint = IntErrorMin;  end
+                app.ErrorIntGauge.Value     = Errorint;
+                app.ErrorIntEditField.Value  = Errorint;
+                app.ErrorIntVec(n)      = Errorint;
+
+                % (c.3) Derivative error
+                ErrorDif = ErrorOld - Error;
+                app.ErrorDifGauge.Value     = ErrorDif;
+                app.ErrorDifEditField.Value  = ErrorDif;
+                app.ErrorDifVec(n)      = ErrorDif;                         
+                
+                %%% [APP10 FEATURE ADDED: DECOUPLED GAINS] %%%
+                % (d) Read APPLIED gains, not directly from slider
+                Kp = app.Kp_applied;
+                Ki = app.Ki_applied;
+                Kd = app.Kd_applied;
+
+                % Record per-sample gain values (always)
+                app.KpVec(n) = Kp;
+                app.KiVec(n) = Ki;
+                app.KdVec(n) = Kd;
+
+                %%% [APP10 FEATURE ADDED: TRUE TIME LOGGING] %%%
+                t = app.ElapsedTime; % Use true time instead of fake (n-1)*0.01
+
+                if abs(Kp - app.LastKp) > 0.001
+                    app.GainChangeLog(end+1, :) = {n, t, 'Kp', ...
+                        app.LastKp, Kp, ...
+                        ['Kp: ' num2str(app.LastKp,'%.3f') ...
+                         ' → ' num2str(Kp,'%.3f')]};
+                    app.LastKp = Kp;
+                end
+
+                if abs(Ki - app.LastKi) > 0.001
+                    app.GainChangeLog(end+1, :) = {n, t, 'Ki', ...
+                        app.LastKi, Ki, ...
+                        ['Ki: ' num2str(app.LastKi,'%.3f') ...
+                         ' → ' num2str(Ki,'%.3f')]};
+                    app.LastKi = Ki;
+                end
+
+                if abs(Kd - app.LastKd) > 0.001
+                    app.GainChangeLog(end+1, :) = {n, t, 'Kd', ...
+                        app.LastKd, Kd, ...
+                        ['Kd: ' num2str(app.LastKd,'%.3f') ...
+                         ' → ' num2str(Kd,'%.3f')]};
+                    app.LastKd = Kd;
+                end
+
+                % (e) PID output (negated for inverted system)
+                OutputVoltage = -(Kp * Error + Ki * Errorint + Kd * ErrorDif);
+
+                % (f) Clamp to [0, 5] V
+                if OutputVoltage > 5,  OutputVoltage = 5;  end
+                if OutputVoltage < 0,  OutputVoltage = 0;  end
+
+                %%% [APP10 FEATURE ADDED: HARDWARE SAFETY CATCH] %%%
+                % (g) Write to LED safely
+                try
+                    writePWMVoltage(app.a, 'D3', OutputVoltage);
+                catch
+                    app.StopFlag = 1;
+                    uialert(app.UIFigure, ...
+                        'Hardware connection lost. Controller stopped.', ...
+                        'Hardware Error');
+                    break;
+                end
+                
+                app.PWMoutputGauge.Value     = OutputVoltage;
+                app.PWMoutputEditField.Value  = OutputVoltage;
+                app.OutputVoltageVec(n) = OutputVoltage;
+
+                % (h) Save error for next derivative
+                ErrorOld = Error;
+
+                % (i) UPDATE LIVE PLOTS
+                % Only update the plot every 10 iterations.
+                % Data is still captured every iteration — this only
+                % controls how often the screen redraws.
+                % Increase the number (e.g. 20, 50) if it still crashes.
+                % Decrease it (e.g. 5) if you want smoother scrolling.
+                if mod(n, 5) == 0 
+                    % mod (n, 5), 50 ms, 20 fps — smoother but heavier
+                    % mod (n, 10), 100 ms, 10 fps - good balance
+                    % mod (n, 20), 200 ms, 5 fps - very stable, less smooth
+                    % mod (n, 50), 500 ms, 2 fps - min. load, noticeable lag
+
+                    xData = 1:n;
+                    set(hAV, 'XData', xData, 'YData', app.ActualValueVec(1:n,1)');
+                    set(hSP, 'XData', xData, 'YData', app.SetPointVec(1:n,1)');
+                    set(hER, 'XData', xData, 'YData', app.ErrorVec(1:n,1)');
+                    set(hEI, 'XData', xData, 'YData', app.ErrorIntVec(1:n,1)');
+                    set(hED, 'XData', xData, 'YData', app.ErrorDifVec(1:n,1)');
+                    set(hOV, 'XData', xData, 'YData', app.OutputVoltageVec(1:n,1)');
+                    drawnow
+                end
+
+                % (j) Advance index and pause
+                n = n + 1;
+                app.CurrentN = n;    % keep property in sync for SAVE button
+                pause(0.01);
+
+            end % end control loop
+
+        end
+
+        % Button pushed function: STOPButton
+        function STOPButtonPushed(app, event)
+            app.StopFlag = 1; 
+            pause(0.05);
+
+            % --- Drain the Arduino serial buffer -------------------------
+            % When the control loop stops, the Arduino still has unread
+            % voltage samples queued in its internal buffer. If we call
+            % runController immediately, readVoltage throws a "buffer full"
+            % error. We drain it by reading and discarding samples in a
+            % try-catch loop until the buffer is empty and reads succeed
+            % cleanly. The catch silently discards any remaining errors.
+            bufferCleared = false;
+            while ~bufferCleared
+                try
+                    readVoltage(app.a, 'A0');  % read and discard
+                    bufferCleared = true;       % if no error, buffer is clear
+                catch
+                    % buffer still has data — keep draining
+                end
+            end
+        end
+
+        % Value changed function: SetPointSlider
+        function SetPointSliderValueChanged(app, event)
+            app.SetPointEditField.Value = app.SetPointSlider.Value;
+            
+            % Read the new slider position and write it to the text box.
+            % The control loop reads from the slider directly, so no other
+            % action is needed — the new setpoint will be picked up on the
+            % next loop iteration
+        end
+
+        % Value changed function: SetPointEditField
+        function SetPointEditFieldValueChanged(app, event)
+            app.SetPointSlider.Value = app.SetPointEditField.Value;
+
+            % Write the typed value to the slider.
+            % App Designer automatically enforces the slider's Limits
+            % so an out-of-range entry is silently clamped.
+        end
+
+        % Button pushed function: RESTARTButton
+        function RESTARTButtonPushed(app, event)
+            app.StopFlag  = 1;
+            app.PauseFlag = 1;   % require START press after recalibration
+            pause(0.05);
+            bufferCleared = false;
+            while ~bufferCleared
+                try
+                    readVoltage(app.a, 'A0');
+                    bufferCleared = true;
+                catch
+                end
+            end
+            if isvalid(app.PlotFigure)
+                close(app.PlotFigure);
+            end
+            runController(app);
+        end
+
+        % Button pushed function: STARTButton
+        function STARTButtonPushed(app, event)
+            
+            app.PauseFlag = 0;
+
+            % Clears PauseFlag so the control loop resumes from where
+            % it left off. Works both on first launch (after calibration)
+            % and after a PAUSE. The index n and all data vectors are
+            % preserved so the recorded signal is continuous.
+            
+        end
+
+        % Button pushed function: PAUSEButton
+        function PAUSEButtonPushed(app, event)
+            
+            app.PauseFlag = 1;
+
+            % Sets PauseFlag so the loop idles on the next iteration.
+            % The LED is turned off inside the idle block (CHANGE 4).
+            % All gain sliders and the setpoint remain adjustable.
+            % Press START to resume — recording continues from where
+            % it paused, with no gap in the index n.
+            
+        end
+
+        % Button pushed function: SAVECSVButton
+        function SAVECSVButtonPushed(app, event)
+            nSaved = app.CurrentN - 1;
+
+            if nSaved < 1
+                uialert(app.UIFigure, ...
+                    'No data recorded yet. Press START first.', ...
+                    'Nothing to save');
+                return
+            end
+
+            timestamp = datestr(now, 'yyyy-mm-dd_HH-MM-SS');
+            
+            %%% [APP10 FEATURE ADDED: TRUE TIME LOGGING] %%%
+            Time_s    = app.TimeVec(1:nSaved); % Uses real tracked time
+
+            % --- FILE 1: Main data log ------------------------------------
+            T = table( ...
+                (1:nSaved)',                    ...
+                Time_s,                         ...
+                app.SetPointVec(1:nSaved),      ...
+                app.ActualValueVec(1:nSaved),   ...
+                app.ErrorVec(1:nSaved),         ...
+                app.ErrorIntVec(1:nSaved),      ...
+                app.ErrorDifVec(1:nSaved),      ...
+                app.OutputVoltageVec(1:nSaved), ...
+                app.KpVec(1:nSaved),            ...
+                app.KiVec(1:nSaved),            ...
+                app.KdVec(1:nSaved),            ...
+                'VariableNames', {              ...
+                    'Sample',                   ...
+                    'Time_s',                   ...
+                    'SetPoint_V',               ...
+                    'ActualValue_V',            ...
+                    'Error_V',                  ...
+                    'ErrorInt_V',               ...
+                    'ErrorDif_V',               ...
+                    'OutputVoltage_V',          ...
+                    'Kp',                       ...
+                    'Ki',                       ...
+                    'Kd'});
+
+            dataFile = ['PID_Data_' timestamp '.csv'];
+            writetable(T, dataFile);
+
+            % --- FILE 2: Gain change event log ----------------------------
+            logFile = ['PID_GainLog_' timestamp '.csv'];
+
+            if isempty(app.GainChangeLog)
+                TLog = table( ...
+                    {'No gain changes detected.'}, ...
+                    'VariableNames', {'Note'});
+            else
+                TLog = cell2table(app.GainChangeLog, ...
+                    'VariableNames', {  ...
+                        'Sample',       ...
+                        'Time_s',       ...
+                        'Gain',         ...
+                        'OldValue',     ...
+                        'NewValue',     ...
+                        'Description'});
+            end
+
+            writetable(TLog, logFile);
+
+            % --- Confirm to user ------------------------------------------
+            uialert(app.UIFigure, ...
+                [num2str(nSaved) ' samples saved.' newline newline ...
+                 'Data file:'  newline dataFile  newline newline ...
+                 'Gain log:'   newline logFile], ...
+                'CSV Saved');
+        end
+
+        % Value changed function: GainsChangingSwitch
+        function GainsChangingSwitchValueChanged(app, event)
+            % Switch callback: GainsChangingSwitch
+            % Switching does not change any code here — it purely controls
+            % which slider callback is active (ValueChangingFcn vs none).
+            % The switch state is read inside the ValueChangingFcn callbacks.
+            % No action needed here.
+            % The ValueChangingFcn callbacks below check the switch state
+            % themselves. Switching to OFF simply makes those callbacks
+            % do nothing, restoring default ValueChangedFcn behaviour.
+        end
+
+        % Value changing function: KpValueSlider
+        function KpValueSliderValueChanging(app, event)
+            if strcmp(app.GainsChangingSwitch.Value, 'On')
+                app.KpValueSlider.Value = event.Value;
+                app.Kp_applied = event.Value;
+            end
+        end
+
+        % Value changing function: KiValueSlider
+        function KiValueSliderValueChanging(app, event)
+            if strcmp(app.GainsChangingSwitch.Value, 'On')
+                app.KiValueSlider.Value = event.Value;
+                app.Ki_applied = event.Value;
+            end
+        end
+
+        % Value changing function: KdValueSlider
+        function KdValueSliderValueChanging(app, event)
+            if strcmp(app.GainsChangingSwitch.Value, 'On')
+                app.KdValueSlider.Value = event.Value;
+                app.Kd_applied = event.Value;
+            end
+        end
+
+        % Value changing function: SetPointSlider
+        function SetPointSliderValueChanging(app, event)
+            if strcmp(app.GainsChangingSwitch.Value, 'On')
+                app.SetPointSlider.Value    = event.Value;
+                app.SetPointEditField.Value = event.Value;
+            end
+        end
+
+        % Value changed function: KpValueSlider
+        function KpValueSliderValueChanged(app, event)
+            newVal = app.KpValueSlider.Value;
+            app.Kp_applied = newVal;
+        end
+
+        % Value changed function: KiValueSlider
+        function KiValueSliderValueChanged(app, event)
+            newVal = app.KiValueSlider.Value;
+            app.Ki_applied = newVal;
+        end
+
+        % Value changed function: KdValueSlider
+        function KdValueSliderValueChanged(app, event)
+            newVal = app.KdValueSlider.Value;
+            app.Kd_applied = newVal;
+        end
+    end
+
+    % Component initialization
+    methods (Access = private)
+
+        % Create UIFigure and components
+        function createComponents(app)
+
+            % Create UIFigure and hide until all components are created
+            app.UIFigure = uifigure('Visible', 'off');
+            app.UIFigure.Position = [100 100 740 400];
+            app.UIFigure.Name = 'MATLAB App';
+
+            % Create ActualValueVGaugeLabel
+            app.ActualValueVGaugeLabel = uilabel(app.UIFigure);
+            app.ActualValueVGaugeLabel.HorizontalAlignment = 'center';
+            app.ActualValueVGaugeLabel.Position = [28 240 86 22];
+            app.ActualValueVGaugeLabel.Text = 'Actual Value, V';
+
+            % Create ActualValueGauge
+            app.ActualValueGauge = uigauge(app.UIFigure, 'circular');
+            app.ActualValueGauge.Limits = [0 5];
+            app.ActualValueGauge.Position = [21 277 100 100];
+
+            % Create ErrorVGaugeLabel
+            app.ErrorVGaugeLabel = uilabel(app.UIFigure);
+            app.ErrorVGaugeLabel.HorizontalAlignment = 'center';
+            app.ErrorVGaugeLabel.Position = [168 240 46 22];
+            app.ErrorVGaugeLabel.Text = 'Error, V';
+
+            % Create ErrorGauge
+            app.ErrorGauge = uigauge(app.UIFigure, 'circular');
+            app.ErrorGauge.Limits = [-1 1];
+            app.ErrorGauge.Position = [141 277 100 100];
+
+            % Create ErrorIntVGaugeLabel
+            app.ErrorIntVGaugeLabel = uilabel(app.UIFigure);
+            app.ErrorIntVGaugeLabel.HorizontalAlignment = 'center';
+            app.ErrorIntVGaugeLabel.Position = [281 240 60 22];
+            app.ErrorIntVGaugeLabel.Text = 'ErrorInt, V';
+
+            % Create ErrorIntGauge
+            app.ErrorIntGauge = uigauge(app.UIFigure, 'circular');
+            app.ErrorIntGauge.Limits = [-50 50];
+            app.ErrorIntGauge.Position = [261 277 100 100];
+
+            % Create ErrorDifVGaugeLabel
+            app.ErrorDifVGaugeLabel = uilabel(app.UIFigure);
+            app.ErrorDifVGaugeLabel.HorizontalAlignment = 'center';
+            app.ErrorDifVGaugeLabel.Position = [401 240 61 22];
+            app.ErrorDifVGaugeLabel.Text = 'ErrorDif, V';
+
+            % Create ErrorDifGauge
+            app.ErrorDifGauge = uigauge(app.UIFigure, 'circular');
+            app.ErrorDifGauge.Limits = [-1 1];
+            app.ErrorDifGauge.Position = [381 277 100 100];
+
+            % Create PWMoutputVGaugeLabel
+            app.PWMoutputVGaugeLabel = uilabel(app.UIFigure);
+            app.PWMoutputVGaugeLabel.HorizontalAlignment = 'center';
+            app.PWMoutputVGaugeLabel.Position = [508 240 86 22];
+            app.PWMoutputVGaugeLabel.Text = 'PWM output, V';
+
+            % Create PWMoutputGauge
+            app.PWMoutputGauge = uigauge(app.UIFigure, 'circular');
+            app.PWMoutputGauge.Limits = [0 5];
+            app.PWMoutputGauge.Position = [501 277 100 100];
+
+            % Create R_LDRLabel
+            app.R_LDRLabel = uilabel(app.UIFigure);
+            app.R_LDRLabel.HorizontalAlignment = 'center';
+            app.R_LDRLabel.Position = [649 240 44 22];
+            app.R_LDRLabel.Text = 'R_LDR';
+
+            % Create R_LDRGauge
+            app.R_LDRGauge = uigauge(app.UIFigure, 'circular');
+            app.R_LDRGauge.Limits = [0 100000];
+            app.R_LDRGauge.Position = [621 277 100 100];
+
+            % Create ActualValueEditField
+            app.ActualValueEditField = uieditfield(app.UIFigure, 'numeric');
+            app.ActualValueEditField.Position = [21 209 100 22];
+
+            % Create ErrorEditField
+            app.ErrorEditField = uieditfield(app.UIFigure, 'numeric');
+            app.ErrorEditField.Position = [141 209 100 22];
+
+            % Create ErrorIntEditField
+            app.ErrorIntEditField = uieditfield(app.UIFigure, 'numeric');
+            app.ErrorIntEditField.Position = [261 209 100 22];
+
+            % Create ErrorDifEditField
+            app.ErrorDifEditField = uieditfield(app.UIFigure, 'numeric');
+            app.ErrorDifEditField.Position = [381 209 100 22];
+
+            % Create PWMoutputEditField
+            app.PWMoutputEditField = uieditfield(app.UIFigure, 'numeric');
+            app.PWMoutputEditField.Position = [501 209 100 22];
+
+            % Create R_LDREditField
+            app.R_LDREditField = uieditfield(app.UIFigure, 'numeric');
+            app.R_LDREditField.Position = [621 209 100 22];
+
+            % Create KpValueSliderLabel
+            app.KpValueSliderLabel = uilabel(app.UIFigure);
+            app.KpValueSliderLabel.FontSize = 10;
+            app.KpValueSliderLabel.Position = [31 151 56 30];
+            app.KpValueSliderLabel.Text = 'Kp Value';
+
+            % Create KpValueSlider
+            app.KpValueSlider = uislider(app.UIFigure);
+            app.KpValueSlider.Limits = [0 2];
+            app.KpValueSlider.MajorTicks = [0 0.4 0.8 1.2 1.6 2];
+            app.KpValueSlider.ValueChangedFcn = createCallbackFcn(app, @KpValueSliderValueChanged, true);
+            app.KpValueSlider.ValueChangingFcn = createCallbackFcn(app, @KpValueSliderValueChanging, true);
+            app.KpValueSlider.MinorTicks = [0 0.05 0.1 0.15 0.2 0.25 0.3 0.35 0.4 0.45 0.5 0.55 0.6 0.65 0.7 0.75 0.8 0.85 0.9 0.95 1 1.05 1.1 1.15 1.2 1.25 1.3 1.35 1.4 1.45 1.5 1.55 1.6 1.65 1.7 1.75 1.8 1.85 1.9 1.95 2];
+            app.KpValueSlider.FontSize = 10;
+            app.KpValueSlider.Position = [99 168 162 3];
+
+            % Create KiValueSliderLabel
+            app.KiValueSliderLabel = uilabel(app.UIFigure);
+            app.KiValueSliderLabel.Position = [31 91 56 30];
+            app.KiValueSliderLabel.Text = 'Ki Value';
+
+            % Create KiValueSlider
+            app.KiValueSlider = uislider(app.UIFigure);
+            app.KiValueSlider.Limits = [0 1];
+            app.KiValueSlider.MajorTicks = [0 0.2 0.4 0.6 0.8 1];
+            app.KiValueSlider.MajorTickLabels = {'0', '0.2', '0.4', '0.6', '0.8', '1'};
+            app.KiValueSlider.ValueChangedFcn = createCallbackFcn(app, @KiValueSliderValueChanged, true);
+            app.KiValueSlider.ValueChangingFcn = createCallbackFcn(app, @KiValueSliderValueChanging, true);
+            app.KiValueSlider.MinorTicks = [0 0.04 0.08 0.12 0.16 0.2 0.24 0.28 0.32 0.36 0.4 0.44 0.48 0.52 0.56 0.6 0.64 0.68 0.72 0.76 0.8 0.84 0.88 0.92 0.96 1];
+            app.KiValueSlider.FontSize = 10;
+            app.KiValueSlider.Position = [99 108 162 3];
+
+            % Create KdValueSliderLabel
+            app.KdValueSliderLabel = uilabel(app.UIFigure);
+            app.KdValueSliderLabel.Position = [31 31 56 30];
+            app.KdValueSliderLabel.Text = 'Kd Value';
+
+            % Create KdValueSlider
+            app.KdValueSlider = uislider(app.UIFigure);
+            app.KdValueSlider.Limits = [0 10];
+            app.KdValueSlider.MajorTicks = [0 2 4 6 8 10];
+            app.KdValueSlider.MajorTickLabels = {'0', '2', '4', '6', '8', '10'};
+            app.KdValueSlider.ValueChangedFcn = createCallbackFcn(app, @KdValueSliderValueChanged, true);
+            app.KdValueSlider.ValueChangingFcn = createCallbackFcn(app, @KdValueSliderValueChanging, true);
+            app.KdValueSlider.MinorTicks = [0 0.4 0.8 1.2 1.6 2 2.4 2.8 3.2 3.6 4 4.4 4.8 5.2 5.6 6 6.4 6.8 7.2 7.6 8 8.4 8.8 9.2 9.6 10];
+            app.KdValueSlider.FontSize = 10;
+            app.KdValueSlider.Position = [99 48 162 3];
+
+            % Create SetPointSlider
+            app.SetPointSlider = uislider(app.UIFigure);
+            app.SetPointSlider.Limits = [0 5];
+            app.SetPointSlider.MajorTicks = [0 1 2 3 4 5];
+            app.SetPointSlider.MajorTickLabels = {'0', '1', '2', '3', '4', '5'};
+            app.SetPointSlider.ValueChangedFcn = createCallbackFcn(app, @SetPointSliderValueChanged, true);
+            app.SetPointSlider.ValueChangingFcn = createCallbackFcn(app, @SetPointSliderValueChanging, true);
+            app.SetPointSlider.MinorTicks = [0 0.2 0.4 0.6 0.8 1 1.2 1.4 1.6 1.8 2 2.2 2.4 2.6 2.8 3 3.2 3.4 3.6 3.8 4 4.2 4.4 4.6 4.8 5];
+            app.SetPointSlider.FontSize = 10;
+            app.SetPointSlider.Position = [328 131 173 3];
+
+            % Create SetpointvalueEditFieldLabel
+            app.SetpointvalueEditFieldLabel = uilabel(app.UIFigure);
+            app.SetpointvalueEditFieldLabel.Position = [321 155 81 22];
+            app.SetpointvalueEditFieldLabel.Text = 'Setpoint value';
+
+            % Create SetPointEditField
+            app.SetPointEditField = uieditfield(app.UIFigure, 'numeric');
+            app.SetPointEditField.Limits = [0 5];
+            app.SetPointEditField.ValueChangedFcn = createCallbackFcn(app, @SetPointEditFieldValueChanged, true);
+            app.SetPointEditField.Position = [410 155 92 22];
+
+            % Create NrSamplesSpinnerLabel
+            app.NrSamplesSpinnerLabel = uilabel(app.UIFigure);
+            app.NrSamplesSpinnerLabel.Position = [321 69 64 22];
+            app.NrSamplesSpinnerLabel.Text = 'NrSamples';
+
+            % Create NrSamplesSpinner
+            app.NrSamplesSpinner = uispinner(app.UIFigure);
+            app.NrSamplesSpinner.Limits = [10 30];
+            app.NrSamplesSpinner.Position = [411 69 91 22];
+            app.NrSamplesSpinner.Value = 10;
+
+            % Create STOPButton
+            app.STOPButton = uibutton(app.UIFigure, 'push');
+            app.STOPButton.ButtonPushedFcn = createCallbackFcn(app, @STOPButtonPushed, true);
+            app.STOPButton.FontColor = [1 1 1];
+            app.STOPButton.Position = [551 31 70 40];
+            app.STOPButton.Text = 'STOP';
+
+            % Create RESTARTButton
+            app.RESTARTButton = uibutton(app.UIFigure, 'push');
+            app.RESTARTButton.ButtonPushedFcn = createCallbackFcn(app, @RESTARTButtonPushed, true);
+            app.RESTARTButton.FontColor = [1 1 1];
+            app.RESTARTButton.Position = [551 81 70 40];
+            app.RESTARTButton.Text = 'RESTART';
+
+            % Create PAUSEButton
+            app.PAUSEButton = uibutton(app.UIFigure, 'push');
+            app.PAUSEButton.ButtonPushedFcn = createCallbackFcn(app, @PAUSEButtonPushed, true);
+            app.PAUSEButton.FontColor = [1 1 1];
+            app.PAUSEButton.Position = [631 81 70 40];
+            app.PAUSEButton.Text = 'PAUSE';
+
+            % Create STARTButton
+            app.STARTButton = uibutton(app.UIFigure, 'push');
+            app.STARTButton.ButtonPushedFcn = createCallbackFcn(app, @STARTButtonPushed, true);
+            app.STARTButton.BackgroundColor = [0.851 0.851 0.851];
+            app.STARTButton.FontSize = 18;
+            app.STARTButton.FontWeight = 'bold';
+            app.STARTButton.FontColor = [0 0 0];
+            app.STARTButton.Position = [551 131 150 50];
+            app.STARTButton.Text = 'START';
+
+            % Create SAVECSVButton
+            app.SAVECSVButton = uibutton(app.UIFigure, 'push');
+            app.SAVECSVButton.ButtonPushedFcn = createCallbackFcn(app, @SAVECSVButtonPushed, true);
+            app.SAVECSVButton.FontColor = [1 1 1];
+            app.SAVECSVButton.Position = [631 31 71 40];
+            app.SAVECSVButton.Text = 'SAVECSV';
+
+            % Create GainsChangingSwitchLabel
+            app.GainsChangingSwitchLabel = uilabel(app.UIFigure);
+            app.GainsChangingSwitchLabel.Position = [321 29 91 22];
+            app.GainsChangingSwitchLabel.Text = 'Gains Changing';
+
+            % Create GainsChangingSwitch
+            app.GainsChangingSwitch = uiswitch(app.UIFigure, 'slider');
+            app.GainsChangingSwitch.ValueChangedFcn = createCallbackFcn(app, @GainsChangingSwitchValueChanged, true);
+            app.GainsChangingSwitch.Position = [443 30 45 20];
+
+            % Show the figure after all components are created
+            app.UIFigure.Visible = 'on';
+        end
+    end
+
+    % App creation and deletion
+    methods (Access = public)
+
+        % Construct app
+        function app = app7_1
+
+            % Create UIFigure and components
+            createComponents(app)
+
+            % Register the app with App Designer
+            registerApp(app, app.UIFigure)
+
+            % Execute the startup function
+            runStartupFcn(app, @startupFcn)
+
+            if nargout == 0
+                clear app
+            end
+        end
+
+        % Code that executes before app deletion
+        function delete(app)
+
+            % Delete UIFigure when app is deleted
+            delete(app.UIFigure)
+        end
+    end
+end

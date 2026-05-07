@@ -1,0 +1,4 @@
+Sample,Time_s,Gain,OldValue,NewValue,Description
+1,5.58e-05,Kp,2,0.4,Kp: 2.000 → 0.400
+1,5.58e-05,Ki,1,0.398,Ki: 1.000 → 0.398
+1,5.58e-05,Kd,10,0.81,Kd: 10.000 → 0.810

@@ -1,0 +1,472 @@
+========================================================================
+  SECTION 7: DEMONSTRATION INSTRUCTIONS
+  PID Controller Lab - App7 (app7_simplified)
+========================================================================
+
+NOTE TO STUDENT:
+  These instructions are written specifically for App7. Key behaviours
+  unique to this version are highlighted with [APP7 NOTE] callouts
+  throughout. Read these notes carefully before running each demo.
+  Section 7 of the project guidelines requires you to record a video
+  showing all five demonstrations (7.1 through 7.5) and discuss each
+  one in the written report.
+
+
+------------------------------------------------------------------------
+BEFORE YOU BEGIN -- SETUP FOR ALL DEMONSTRATIONS
+------------------------------------------------------------------------
+
+1.  Connect the Arduino Uno R3 to your PC via USB. Make sure the LED
+    is wired to digital pin D3 through a 220 ohm series resistor, and
+    that the LDR voltage divider (with 5.1 kohm series resistor) feeds
+    analog pin A0.
+
+2.  Verify your COM port:
+      Windows  -> Device Manager -> Ports (COM & LPT)
+      Mac/Linux -> check /dev/ttyUSB0 or /dev/ttyACM0
+    Open app7_simplified.m in MATLAB App Designer and update the line:
+        a = arduino('COM5', 'Uno');
+    replacing 'COM5' with your actual port before running.
+
+3.  Open the app in MATLAB App Designer and press Run (F5).
+
+4.  The app launches and auto-calibrates immediately:
+      - The LED turns ON briefly (measuring SetPointMin -- the lower
+        voltage at A0 corresponding to maximum brightness).
+      - The LED then turns OFF (measuring SetPointMax -- the higher
+        voltage at A0 in darkness).
+      - The Actual Value gauge, SetPoint slider, and SetPoint edit
+        field limits are all set automatically based on the measured
+        voltage range. The exact range will depend on your ambient
+        light, the LED, and the geometry of your tissue diffuser, so
+        expect values different from any other student's setup.
+      - The loop then idles at the midpoint setpoint, waiting for
+        you to press START.
+
+5.  Place a small piece of folded tissue between the LED and the LDR
+    to diffuse the light evenly. Do not change this physical setup
+    between demonstrations.
+
+6.  Set all gain sliders (Kp, Ki, Kd) to ZERO before each new
+    demonstration unless otherwise stated below.
+
+7.  The Gains Changing switch controls how slider changes apply:
+        OFF (default) -> gain takes effect when you RELEASE the slider
+        ON            -> gain updates continuously while dragging
+    Use ON mode only when you need real-time response (for instance
+    when sweeping Kp upward in 7.4 to find the instability threshold).
+
+[APP7 NOTE -- Derivative Term]
+  In App7 the derivative is computed on the ERROR signal:
+      ErrorDif = ErrorOld - Error
+  This is a per-sample difference, so its units are volts per sample
+  (V/sample), NOT volts per second. The ErrorDif gauge limits are
+  set to [-1, +1] V/sample. Because the derivative is on the error,
+  any abrupt setpoint change will produce a brief spike on the
+  ErrorDif gauge -- this is called "derivative kick" and is normal
+  for App7. You will see this clearly in 7.1 when stepping the
+  setpoint.
+
+[APP7 NOTE -- Integral Scaling]
+  In App7 the integral is accumulated as a per-sample sum:
+      Errorint = Errorint + Error
+  The dt (loop time) is NOT included. This means the integral fills
+  up faster than in App10 for the same physical conditions, because
+  every iteration adds the full error value rather than (Error * dt).
+  The anti-windup clamp is set to +/- 50 V*samples (IntErrorMax = 50,
+  IntErrorMin = -50). The ErrorInt gauge has matching limits of
+  [-50, +50].
+
+[APP7 NOTE -- PID Sign Convention]
+  The output formula in App7 is:
+      OutputVoltage = -(Kp*Error + Ki*Errorint + Kd*ErrorDif)
+  All three terms are inside the same negation. The outer minus
+  sign is required because the system is physically inverted (a
+  brighter LED produces a LOWER voltage at the LDR).
+
+[APP7 NOTE -- Recording Buffer]
+  Data vectors are pre-allocated to 10,000 samples, which is enough
+  for many minutes of continuous recording at the typical loop
+  period of this app. STOP and SAVECSV between scenarios so each
+  demo is saved to its own file.
+
+
+========================================================================
+7.1  TRACKING -- INTEGRAL-ONLY CONTROL (Ki ONLY)
+========================================================================
+
+Goal:
+  Demonstrate that the controller follows a changing setpoint using
+  integral action alone. This is called "tracking." Use both the
+  SetPointSlider and the SetPointEditField to vary the setpoint, as
+  required by Section 7.1 of the project guidelines.
+
+Gain settings:
+  Kp = 0    Ki = 1    Kd = 0
+
+Steps:
+  1.  Set Kp = 0, Ki = 1, Kd = 0 using the sliders. Confirm the
+      values appear on the slider labels.
+  2.  Press START. The system should hold the calibrated midpoint
+      setpoint, and the PWM output will settle at whatever value
+      keeps the Actual Value at that setpoint.
+  3.  Drag the SetPointSlider to a higher value (somewhere near the
+      top end of the calibrated range). The PWM output drops
+      because a higher target LDR voltage means the LED needs to
+      dim.
+  4.  Type a different value directly into the SetPointEditField
+      (try a value near the bottom of the calibrated range) and
+      press Enter. Confirm that the slider updates to match and
+      that the Actual Value responds.
+  5.  Move the setpoint back and forth at least twice so tracking
+      is clearly visible on the live plot.
+  6.  Press STOP, then SAVECSV to record the run.
+
+What to observe:
+  - The Actual Value trace tracks the SetPoint trace in subplot 1
+    of the live plot. After each step change, expect the Actual
+    Value to converge onto the new setpoint within a handful of
+    samples.
+  - The ErrorInt gauge accumulates while error is non-zero.
+    Because App7 sums error per sample, the gauge moves quickly
+    -- it will drift away from zero between step changes and
+    unwind back toward zero each time the error is driven to zero.
+  - The PWM output adjusts continuously to close the gap, falling
+    when the setpoint is raised and rising when the setpoint is
+    lowered.
+
+[APP7 NOTE -- Derivative Kick]
+  Watch the ErrorDif gauge each time you change the setpoint. You
+  should see a sharp spike at the moment of the step. This is the
+  derivative kick that occurs because App7 differentiates the
+  error signal directly. With Kd = 0 in this demo it has no effect
+  on the output, but it is visible on the gauge and on subplot 4
+  of the live plot.
+
+What to include in the report:
+  - Show the output graph segment where the Actual Value follows
+    the SetPoint through at least two step changes.
+  - Explain that the integral term accumulates error over time
+    until the error is driven to zero, enabling the controller to
+    track any setpoint within the calibrated range.
+  - Mention that any spikes visible on the ErrorDif plot at each
+    step change are derivative kicks -- a known characteristic of
+    differentiating the error rather than the process variable.
+
+
+========================================================================
+7.2  PROPORTIONAL-ONLY CONTROL -- STEADY-STATE ERROR
+========================================================================
+
+Goal:
+  Demonstrate that proportional action alone cannot eliminate the
+  steady-state offset between the setpoint and the actual value.
+  Section 7.2 of the project guidelines specifies Kp = 1, Ki = 0.
+
+Gain settings:
+  Kp = 1    Ki = 0    Kd = 0
+
+Steps:
+  1.  Set Ki = 0, Kd = 0, Kp = 1.
+  2.  Press START.
+  3.  Move the SetPointSlider to a value well away from the current
+      Actual Value. Try at least two different setpoints across the
+      calibrated range so the offset behaviour is visible at
+      multiple operating points.
+  4.  Wait for the system to settle at each setpoint. Observe that
+      the Actual Value moves toward the setpoint but stops short
+      -- a visible gap remains between the SetPoint and Actual
+      Value traces.
+  5.  Press STOP and SAVECSV.
+
+What to observe:
+  - The Error gauge reads a non-zero value at steady state for any
+    setpoint that requires the LED to be partially on. The size of
+    the residual error grows as the demanded change from the
+    natural rest point grows.
+  - The ErrorInt gauge drifts toward its clamp because Error stays
+    non-zero. It will eventually pin at -50 or +50 V*samples
+    (whichever direction the error has). The clamp prevents
+    runaway accumulation, which is the entire purpose of the
+    anti-windup limit. With Ki = 0 this saturated integral has no
+    effect on the output, but it is still visible on the gauge
+    and plot.
+  - The PWM output settles at a constant value proportional to the
+    error. Larger errors produce larger constant outputs.
+
+What to include in the report:
+  - Show the output graph where the Actual Value approaches but
+    does not reach the SetPoint line.
+  - Explain that with proportional control only, the output is
+    proportional to the error. As the error shrinks, so does the
+    corrective action. A residual steady-state error must remain
+    to sustain the small output that holds the current position.
+  - Note that even though Ki = 0, the ErrorInt trace still climbs
+    to its anti-windup clamp because the integral is computed
+    every iteration regardless of whether it is multiplied by Ki
+    in the output equation. This demonstrates that the clamp is
+    doing its job -- without it the integral would grow without
+    bound.
+
+
+========================================================================
+7.3  INTEGRAL WINDUP -- DEMONSTRATION AND RECOVERY
+========================================================================
+
+Goal:
+  Demonstrate integral windup by letting the error persist with
+  all gains at zero, then show recovery by restoring Ki to a
+  reasonable value (0.4) as required by Section 7.3 of the project
+  guidelines.
+
+Gain settings (Phase 1 -- Windup):
+  Kp = 0    Ki = 0    Kd = 0
+
+Gain settings (Phase 2 -- Recovery):
+  Kp = 0    Ki = 0.4    Kd = 0
+
+Steps:
+  PHASE 1 -- Cause windup:
+  1.  Set all gains to 0.
+  2.  Press START. Because all gains are zero, the PWM output is
+      held at 0 V regardless of the error -- the LED stays off and
+      the LDR sees only ambient light. Error sits at a large
+      negative value continuously (Actual is high near SetPointMax,
+      SetPoint is at the midpoint).
+  3.  Watch the ErrorInt gauge climb in the negative direction.
+
+  [APP7 NOTE -- Windup Speed]
+    Because App7 adds raw error per sample (no dt scaling), windup
+    is FAST in this version. Expect the ErrorInt gauge to reach
+    its clamp of -50 V*samples within a small number of seconds
+    -- you do not need to wait long.
+
+  4.  Confirm that ErrorInt has saturated at -50 V*samples (the
+      gauge reads -50 and the trace flattens) before moving to
+      Phase 2.
+
+  PHASE 2 -- Demonstrate recovery:
+  5.  Set Ki = 0.4 (leave Kp and Kd at 0).
+  6.  Observe that the large negative integral now drives the PWM
+      output high. Expect the output to jump straight to its 5 V
+      saturation limit because the (negated) accumulated integral
+      is much larger than 5 V.
+  7.  The LED comes on at full brightness, so the Actual Value
+      drops sharply. Expect a deep undershoot below the setpoint
+      because the LED is briefly being driven harder than steady
+      state requires.
+  8.  Once the Error changes sign, the integral begins to unwind.
+      The output drops gradually back toward a steady value as the
+      ErrorInt gauge climbs back toward zero. The Actual Value
+      should eventually settle near the setpoint.
+  9.  Press STOP and SAVECSV.
+
+What to observe:
+  - During Phase 1, the ErrorInt plot ramps roughly linearly
+    downward and then flattens at -50 V*samples (the anti-windup
+    clamp).
+  - On restoring Ki, the PWM output saturates at 5 V immediately
+    because the saturated integral demands a large LED brightness.
+  - As the integral unwinds, the output decreases smoothly from
+    saturation back to its steady-state holding value.
+  - The Actual Value trace shows a deep undershoot followed by a
+    slow recovery -- this is the classic windup symptom.
+
+What to include in the report:
+  - Show the output graph spanning both phases.
+  - Explain that windup occurs because error accumulated while the
+    output was unable to respond (Ki = 0 meant the integral term
+    contributed nothing). Recovery occurs as the integral
+    discharges once Ki is restored.
+  - State explicitly that the +/- 50 V*samples clamp prevents the
+    integral from growing unboundedly. Without the clamp, recovery
+    would take much longer because the integral could grow to any
+    value during the windup phase.
+  - Discuss the overshoot visible during recovery as a direct
+    consequence of the saturated integral being released suddenly.
+
+
+========================================================================
+7.4  INSTABILITY -- EXCESSIVE GAIN DEMONSTRATION
+========================================================================
+
+Goal:
+  Demonstrate that setting gains too high causes the system to
+  oscillate and become unstable, as required by Section 7.4 of the
+  project guidelines. Observe instability on the gauges and on the
+  physical LED.
+
+Gain settings (start stable, then increase in stages):
+  Phase A: Kp = 0.4    Ki = 0.4    Kd = 0.8   (stable starting point)
+  Phase B: Kp = 2.0    Ki = 0.4    Kd = 0.8
+  Phase C: Kp = 2.0    Ki = 1.0    Kd = 0.8
+  Phase D: Kp = 2.0    Ki = 1.0    Kd = 10.0  (unstable)
+
+Steps:
+  1.  Begin with stable gains: Kp = 0.4, Ki = 0.4, Kd = 0.8.
+  2.  Press START and confirm the system settles at the midpoint
+      setpoint with a steady non-zero PWM output.
+  3.  Allow the system to settle, then raise Kp to 2.0. The Actual
+      Value may briefly dip but should return to the setpoint.
+  4.  Once the system has stabilised again, raise Ki to 1.0. You may
+      see a small overshoot, but the system should still recover.
+  5.  Once the system has stabilised again, raise Kd to 10.0. The
+      system should break into sustained large-amplitude
+      oscillation.
+  6.  Observe the LED itself -- it visibly flickers between bright
+      and dim as the PWM output swings between its 0 V and 5 V
+      saturation limits.
+  7.  Press STOP to stop the oscillation, then SAVECSV.
+
+What to observe:
+  - Once Kd reaches its maximum, the Actual Value oscillates across
+    much of the calibrated range, and the PWM output saturates
+    alternately at 0 V and 5 V.
+  - The ErrorDif gauge swings widely as it tracks the rapidly
+    changing error.
+  - The LED flickers visibly. Do not run this for long -- saturating
+    the PWM output at high frequency stresses the components.
+
+[APP7 NOTE -- Kd Drives Instability in App7]
+  In App7 the derivative is computed directly on the noisy raw
+  error (no filtering). High Kd amplifies sample-to-sample sensor
+  noise, which makes the derivative term extremely jumpy. This is
+  precisely why Kd = 10 destabilises the loop: the controller is
+  reacting violently to noise, not to real error trends. If you
+  push Kd alone (with Kp and Ki low) you can already see clear
+  instability. Pay close attention to this in your report -- it
+  is the main difference from App10.
+
+What to include in the report:
+  - Show the output graph segment where oscillation is clearly
+    visible across all five subplots.
+  - Explain that high Kp amplifies even small errors into large
+    corrective outputs, which overshoot and cause the error to
+    reverse sign -- producing oscillation.
+  - Explain that high Kd in App7 amplifies sensor noise directly
+    because the derivative is computed on the raw error. This
+    contrasts with App10 (which filters the PV before
+    differentiating) and is responsible for the rapid, violent
+    oscillation seen here.
+
+
+========================================================================
+7.5  EXTERNAL DISTURBANCE REJECTION
+========================================================================
+
+Goal:
+  Demonstrate that the closed-loop controller compensates for
+  external changes in light conditions by covering and uncovering
+  the LDR, as required by Section 7.5 of the project guidelines.
+
+Gain settings (stable tuned values):
+  Kp = 0.4    Ki = 0.4    Kd = 0.8
+
+Steps:
+  1.  Set Kp = 0.4, Ki = 0.4, Kd = 0.8.
+  2.  Press START and wait for the system to settle at the setpoint
+      (the midpoint of the calibrated range). The PWM output should
+      hold at a steady non-zero value.
+  3.  DISTURBANCE 1 -- Cover the LDR with your finger or a piece of
+      opaque material. Within a sample or two the Actual Value will
+      jump upward (the LDR sees less light through the cover). The
+      Error becomes strongly negative, and the controller drives
+      the PWM output toward its 5 V saturation limit trying to make
+      the LED bright enough to compensate. Hold the cover in place
+      for roughly half a minute so the disturbance is clearly
+      visible on the plot.
+  4.  DISTURBANCE 2 -- Remove the cover suddenly. The Actual Value
+      will drop downward (the LDR now sees the saturated LED at
+      full brightness directly). The error flips sign, the output
+      drops, and the system begins recovering toward the setpoint.
+      Recovery is gradual and may take tens of seconds because the
+      integral term needs to unwind from its clamp.
+  5.  Repeat cover/uncover at least once more so the behaviour is
+      clearly visible in the output graph.
+  6.  Press STOP and SAVECSV.
+
+What to observe:
+  - Each disturbance causes a sharp jump on the Actual Value plot,
+    followed by a slower recovery toward the SetPoint line.
+  - The Error gauge spikes during the disturbance and then returns
+    toward zero.
+  - The PWM output rises and saturates at 5 V when the LDR is
+    covered, and drops sharply when the cover is removed.
+  - In the live plot, this appears as a clear "dip then recover"
+    pattern in subplot 1, matched by saturation events in subplot 5.
+
+What to include in the report:
+  - Show the output graph segment containing at least two
+    disturbance events and their recoveries.
+  - Explain that the feedback loop continuously measures the
+    Actual Value and recalculates the error. When a disturbance
+    changes the LDR voltage, the resulting error is detected
+    immediately and the PID controller adjusts the LED output to
+    restore the setpoint.
+  - Note that this behaviour would not be possible with feedforward
+    (open-loop) control, which has no mechanism to detect or
+    correct for unexpected disturbances. This directly answers
+    Question 2 of the project guidelines (control of external
+    disturbance).
+  - Mention that during the cover phase the PWM output may saturate
+    at 5 V because the LDR voltage rose so far above the setpoint
+    that even maximum LED brightness could not bring it back. The
+    physical disturbance simply exceeded the controller's actuation
+    range -- a hardware limit, not an algorithmic failure.
+
+
+========================================================================
+REPORT WRITING CHECKLIST -- SECTION 7
+========================================================================
+
+For each demonstration (7.1 through 7.5), your report must address:
+
+  [ ] Reference the corresponding region of your output graph (the
+      5-subplot figure generated by the app or saved via SAVECSV
+      and re-plotted).
+
+  [ ] Describe the sensor measurement:
+        The LDR voltage at analog pin A0 is averaged over NrSamples
+        readings to reduce noise. The LDR resistance is calculated
+        using the voltage divider formula (this is the answer to
+        Question 1 of the project guidelines):
+            R_LDR = R_Series * (V / (Vcc - V))
+        where R_Series = 5100 ohms, Vcc = 5 V, and V = ActualValue.
+
+  [ ] Describe the error calculation:
+        Error = SetPoint - ActualValue
+        Error can be positive (Actual below SetPoint) or negative
+        (Actual above SetPoint).
+
+  [ ] Explain the PID output formula used in App7:
+        OutputVoltage = -(Kp*Error + Ki*Errorint + Kd*ErrorDif)
+        ErrorDif      = ErrorOld - Error      (per sample)
+        Errorint      = Errorint + Error      (per sample, no dt)
+
+      Note the sign of each term:
+        - The overall negative sign is required because the system
+          is physically inverted (brighter LED -> lower LDR
+          voltage).
+        - All three terms are inside the same negation.
+        - ErrorDif uses ErrorOld - Error (not Error - ErrorOld) so
+          that the sign of the derivative term works correctly with
+          the outer minus sign.
+
+  [ ] Connect the mathematical behaviour visible on the gauges to
+      what you physically observe on the LED (brightness changes).
+
+  [ ] For 7.3: explicitly discuss the anti-windup clamp (+/- 50
+      V*samples) and explain why it is necessary.
+
+  [ ] For 7.4: explain why instability occurs and why high Kd is
+      particularly destabilising in App7 (because the derivative
+      is on the raw, unfiltered error and amplifies sensor noise).
+
+  [ ] Answer Question 1 (LDR resistance derivation) and Question 2
+      (instability and disturbance rejection discussion) explicitly
+      in the report.
+
+
+========================================================================
+END OF SECTION 7 DEMONSTRATION INSTRUCTIONS -- APP7
+========================================================================
